@@ -435,15 +435,36 @@ function playAIAudio(q,kind,text,onend=null,selectedNo=null,buttonMode=false){
  if('speechSynthesis' in window) speechSynthesis.cancel();
  const a=new Audio(aiAudioPath(q,kind,selectedNo));
  currentAudio=a; currentAudioKey=key; a.preload='auto'; a.playbackRate=aiPlaybackRate();
- a.onplay=()=>{isSpeaking=true;isPaused=false;const b=document.getElementById('speakBtn');if(b&&buttonMode)b.textContent='⏸ 一時停止';};
- a.onpause=()=>{if(!a.ended){isPaused=true;if(buttonMode){const b=document.getElementById('speakBtn');if(b)b.textContent='▶ 続きから再開';}}};
+ const updateListenMediaStatus=(state)=>{
+   if(!listenActive || buttonMode) return;
+   const qs=getSelectedListenQuestions(); const activeQ=qs[listenIndex];
+   if(!activeQ || activeQ.id!==q.id) return;
+   const now=document.getElementById('listenNow'); if(!now) return;
+   if(listenPaused){ now.textContent='一時停止中'; return; }
+   if(state==='loading') now.textContent=kind==='answer'?`問${q.no}の正解・解説の音声を読み込み中…`:`問${q.no}（${q.category}）の音声を読み込み中…`;
+   if(state==='playing') now.textContent=kind==='answer'?`問${q.no}の正解・解説を読み上げ中`:`問${q.no}（${q.category}）を読み上げ中`;
+ };
+ a.onplay=()=>{
+   if(listenActive && listenPaused && !buttonMode){ try{a.pause();}catch(e){} return; }
+   isSpeaking=true;isPaused=false;updateListenMediaStatus('playing');
+   const b=document.getElementById('speakBtn');if(b&&buttonMode)b.textContent='⏸ 一時停止';
+ };
+ a.onplaying=()=>{
+   if(listenActive && listenPaused && !buttonMode){ try{a.pause();}catch(e){} return; }
+   updateListenMediaStatus('playing');
+ };
+ a.onwaiting=()=>updateListenMediaStatus('loading');
+ a.onstalled=()=>updateListenMediaStatus('loading');
+ a.onpause=()=>{if(!a.ended){isPaused=true;if(listenActive&&listenPaused&&!buttonMode){const now=document.getElementById('listenNow');if(now)now.textContent='一時停止中';}if(buttonMode){const b=document.getElementById('speakBtn');if(b)b.textContent='▶ 続きから再開';}}};
  a.onended=()=>{isSpeaking=false;isPaused=false;currentAudio=null;currentAudioKey='';if(buttonMode){const b=document.getElementById('speakBtn');if(b)b.textContent='🔊 読み上げ';}if(onend)onend();};
  a.onerror=()=>{
    currentAudio=null;currentAudioKey='';isSpeaking=false;isPaused=false;
    if(buttonMode){const b=document.getElementById('speakBtn');if(b)b.textContent='🔊 読み上げ';}
+   if(listenActive && listenPaused && !buttonMode) return;
    speakSystem(text,onend,buttonMode);
  };
- a.play().catch(()=>{ a.onerror(); });
+ updateListenMediaStatus('loading');
+ a.play().catch(err=>{ if(err && err.name==='AbortError') return; a.onerror(); });
  return true;
 }
 function speakSystem(text,onend=null,buttonMode=false){
@@ -554,7 +575,7 @@ function playListenQuestion(){
  if(!listenActive||listenPaused) return;
  const listenQuestions=getSelectedListenQuestions(); const q=listenQuestions[listenIndex]; listenStage='question';
  document.getElementById('listenStatus').textContent=`問題 ${listenIndex+1} / ${getSelectedListenQuestions().length}`;
- document.getElementById('listenNow').textContent=`問${q.no}（${q.category}）を読み上げ中`;
+ document.getElementById('listenNow').textContent=`問${q.no}（${q.category}）の音声を準備中…`;
  document.getElementById('listenBar').style.width=`${(listenIndex)/getSelectedListenQuestions().length*100}%`;
  playSpeechForQuestion(q,listenTextForQuestion(q),()=>{
    if(!listenActive) return;
@@ -567,7 +588,7 @@ function playListenQuestion(){
 function playListenAnswer(){
  if(!listenActive||listenPaused) return;
  const listenQuestions=getSelectedListenQuestions(); const q=listenQuestions[listenIndex]; listenStage='answer';
- document.getElementById('listenNow').textContent=`問${q.no}の正解・解説を読み上げ中`;
+ document.getElementById('listenNow').textContent=`問${q.no}の正解・解説の音声を準備中…`;
  playSpeechForAnswer(q,listenTextForAnswer(q),()=>{
    if(!listenActive) return;
    listenStage='waitNext';
@@ -582,7 +603,9 @@ function toggleListenPause(){
  const btn=document.getElementById('listenPauseBtn');
  if(!listenPaused){
    listenPaused=true;
-   if(currentAudio && !currentAudio.paused) currentAudio.pause();
+   // iPhoneではMP3が読み込み中の間は currentAudio.paused=true のことがある。
+   // その状態でも pause() を呼び、保留中の play() が後から開始しないようにする。
+   if(currentAudio){ try{currentAudio.pause();}catch(e){} }
    else if('speechSynthesis' in window && speechSynthesis.speaking && !speechSynthesis.paused) speechSynthesis.pause();
    if(listenTimer){ clearTimeout(listenTimer); listenTimer=null; }
    btn.textContent='▶ 続きから再開';
