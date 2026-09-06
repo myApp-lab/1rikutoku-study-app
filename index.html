@@ -75,13 +75,14 @@ footer { opacity:.55; font-size:.8rem; margin-top:28px; }
     </div>
     <div class="card">
       <b>音声設定</b>
+      <div style="margin-top:10px"><div class="small">音声方式</div><select id="homeEngineSelect" style="width:100%;min-height:46px" onchange="changeAudioEngine(this.value)"><option value="system">端末標準音声</option><option value="ai">高品質AI音声</option></select></div>
       <div class="row" style="margin-top:10px">
         <select id="homeVoiceSelect" aria-label="音声" onchange="changeVoice(this.value)"></select>
         <select id="homeRateSelect" aria-label="速度" onchange="changeRate(this.value)">
           <option value="0.8">ゆっくり</option><option value="0.95" selected>自然</option><option value="1.1">速め</option>
         </select>
       </div>
-      <div class="small" style="margin-top:8px">iPhone内の日本語音声を使用します。利用可能な音声は端末によって異なります。</div>
+      <div id="homeAudioNote" class="small" style="margin-top:8px">端末標準音声はiPhone内の日本語音声を使用します。高品質AI音声は事前生成した音声ファイルを再生します。</div>
     </div>
   </section>
 
@@ -97,6 +98,7 @@ footer { opacity:.55; font-size:.8rem; margin-top:28px; }
       <div id="explanation" class="hidden card"></div>
       <div class="card" style="margin-top:12px">
         <b>音声設定</b>
+        <div style="margin-top:10px"><div class="small">音声方式</div><select id="quizEngineSelect" style="width:100%;min-height:46px" onchange="changeAudioEngine(this.value)"><option value="system">端末標準音声</option><option value="ai">高品質AI音声</option></select></div>
         <div class="row" style="margin-top:10px">
           <select id="quizVoiceSelect" aria-label="音声" onchange="changeVoice(this.value)"></select>
           <select id="quizRateSelect" aria-label="速度" onchange="changeRate(this.value)">
@@ -121,6 +123,7 @@ footer { opacity:.55; font-size:.8rem; margin-top:28px; }
       <select id="listenSetSelect" style="width:100%;min-height:48px;margin-top:10px">
         <option value="2022-06-JZ46A">2022年6月 無線工学 JZ46A（5問収録）</option>
       </select>
+      <div style="margin-top:12px"><div class="small">音声方式</div><select id="listenEngineSelect" style="width:100%;min-height:46px" onchange="changeAudioEngine(this.value)"><option value="system">端末標準音声</option><option value="ai">高品質AI音声</option></select></div>
       <div class="row" style="margin-top:12px">
         <div><div class="small">問題→解答の間</div><select id="listenPauseSelect" style="width:100%;min-height:46px"><option value="3000">3秒</option><option value="5000" selected>5秒</option><option value="8000">8秒</option></select></div>
         <div><div class="small">読み上げ速度</div><select id="listenRateSelect" style="width:100%;min-height:46px" onchange="changeRate(this.value)"><option value="0.8">ゆっくり</option><option value="0.95" selected>自然</option><option value="1.1">速め</option></select></div>
@@ -206,6 +209,8 @@ let listenPaused=false;
 let listenIndex=0;
 let listenStage='idle';
 let listenTimer=null;
+let currentAudio=null;
+let currentAudioKey='';
 
 function initSetSelectors(){
  const hs=document.getElementById('homeSetSelect'); const ls=document.getElementById('listenSetSelect');
@@ -277,7 +282,7 @@ function prevQuestion() {
 function choose(n,btn) {
  // 学習モードで問題を読み上げ中（または一時停止中）に回答した場合も、
  // 現在の問題読み上げを止めたあと、回答・正誤・解説を自動で読み上げる。
- const wasReading = isSpeaking || isPaused ||
+ const wasReading = isSpeaking || isPaused || !!(currentAudio && !currentAudio.ended) ||
    ('speechSynthesis' in window && (speechSynthesis.speaking || speechSynthesis.paused));
  cancelSpeech();
  const q=filtered[idx]; answers[idx]=n;
@@ -293,7 +298,7 @@ function choose(n,btn) {
      const lead = ok
        ? `あなたの回答は${n}番${selectedText}。正解です。`
        : `あなたの回答は${n}番${selectedText}。不正解です。正解は${q.answer}番${correctText}。`;
-     speak(readAloudText(`${lead} ${q.normal} ${q.exam}`));
+     speakResponse(q,n,readAloudText(`${lead} ${q.normal} ${q.exam}`));
    }
  }
 }
@@ -318,6 +323,7 @@ function cancelSpeech() {
  if(listenTimer){ clearTimeout(listenTimer); listenTimer=null; }
  listenActive=false; listenPaused=false; listenStage='idle';
  if('speechSynthesis' in window) speechSynthesis.cancel();
+ stopCurrentAudio();
  isSpeaking=false;
  isPaused=false;
  const btn=document.getElementById('speakBtn');
@@ -394,66 +400,95 @@ function readAloudText(text){
  return t.replace(/\s+/g,' ').trim();
 }
 
-function speakCurrent(forceStart=false) {
- if(speakTimer){ clearTimeout(speakTimer); speakTimer=null; }
 
- // 手動操作では、読み上げ中→一時停止、一時停止中→続きから再開。
- // 問題移動・回答選択などでは cancelSpeech() が呼ばれるため完全停止する。
- if(!forceStart && 'speechSynthesis' in window) {
-   if(isPaused && speechSynthesis.paused) {
-     speechSynthesis.resume();
-     isPaused=false;
-     isSpeaking=true;
-     const btn=document.getElementById('speakBtn');
-     if(btn) btn.textContent='⏸ 一時停止';
-     return;
-   }
-   if(isSpeaking && speechSynthesis.speaking) {
-     speechSynthesis.pause();
-     isPaused=true;
-     const btn=document.getElementById('speakBtn');
-     if(btn) btn.textContent='▶ 続きから再開';
-     return;
-   }
- }
-
- const q=filtered[idx];
- let t=readAloudText(`問題${q.no}。${q.text}。`);
- q.choices.forEach((c,i)=>t+=readAloudText(`選択肢${i+1}。${c}。`));
- if(!q.audio)t='この問題は図を見る必要があります。'+t;
- speak(t);
+const AI_VOICES=[
+ {id:'marin',label:'Marin（自然・明瞭）'},
+ {id:'cedar',label:'Cedar（落ち着き）'},
+ {id:'coral',label:'Coral'},
+ {id:'sage',label:'Sage'},
+ {id:'shimmer',label:'Shimmer'}
+];
+function getAudioEngineSetting(){ return localStorage.getItem('rikujou_audio_engine')||'system'; }
+function getSystemVoiceSetting(){ return localStorage.getItem('rikujou_system_voice')||localStorage.getItem('rikujou_voice')||''; }
+function getAIVoiceSetting(){ return localStorage.getItem('rikujou_ai_voice')||'marin'; }
+function changeAudioEngine(value){ localStorage.setItem('rikujou_audio_engine',value); cancelSpeech(); populateAllVoiceSelects(); syncAudioControls(); }
+function safeAudioId(id){ return String(id).replace(/[^A-Za-z0-9_-]/g,'_'); }
+function aiAudioPath(q,kind,selectedNo=null){
+ const voice=getAIVoiceSetting();
+ const base=`audio/ai/${voice}/${safeAudioId(q.id)}`;
+ if(kind==='response') return `${base}/response-${selectedNo}.mp3`;
+ return `${base}/${kind}.mp3`;
 }
-function speak(text) {
- cancelSpeech();
+function aiPlaybackRate(){ const r=parseFloat(getRateSetting()); if(r<=0.8)return .9; if(r>=1.1)return 1.1; return 1.0; }
+function stopCurrentAudio(){
+ if(currentAudio){ try{currentAudio.pause(); currentAudio.currentTime=0;}catch(e){} }
+ currentAudio=null; currentAudioKey='';
+}
+function playAIAudio(q,kind,text,onend=null,selectedNo=null,buttonMode=false){
+ const key=`${q.id}:${kind}:${selectedNo||''}:${getAIVoiceSetting()}`;
+ if(buttonMode && currentAudio && currentAudioKey===key){
+   if(currentAudio.paused){ currentAudio.play().catch(()=>{}); isPaused=false; isSpeaking=true; const b=document.getElementById('speakBtn'); if(b)b.textContent='⏸ 一時停止'; }
+   else { currentAudio.pause(); isPaused=true; const b=document.getElementById('speakBtn'); if(b)b.textContent='▶ 続きから再開'; }
+   return true;
+ }
+ stopCurrentAudio();
+ if('speechSynthesis' in window) speechSynthesis.cancel();
+ const a=new Audio(aiAudioPath(q,kind,selectedNo));
+ currentAudio=a; currentAudioKey=key; a.preload='auto'; a.playbackRate=aiPlaybackRate();
+ a.onplay=()=>{isSpeaking=true;isPaused=false;const b=document.getElementById('speakBtn');if(b&&buttonMode)b.textContent='⏸ 一時停止';};
+ a.onpause=()=>{if(!a.ended){isPaused=true;if(buttonMode){const b=document.getElementById('speakBtn');if(b)b.textContent='▶ 続きから再開';}}};
+ a.onended=()=>{isSpeaking=false;isPaused=false;currentAudio=null;currentAudioKey='';if(buttonMode){const b=document.getElementById('speakBtn');if(b)b.textContent='🔊 読み上げ';}if(onend)onend();};
+ a.onerror=()=>{
+   currentAudio=null;currentAudioKey='';isSpeaking=false;isPaused=false;
+   if(buttonMode){const b=document.getElementById('speakBtn');if(b)b.textContent='🔊 読み上げ';}
+   speakSystem(text,onend,buttonMode);
+ };
+ a.play().catch(()=>{ a.onerror(); });
+ return true;
+}
+function speakSystem(text,onend=null,buttonMode=false){
+ if(!('speechSynthesis' in window)){ if(onend)onend(); return; }
  const u=new SpeechSynthesisUtterance(text);
- const voices=speechSynthesis.getVoices();
- const sel=getVoiceSetting();
+ const voices=speechSynthesis.getVoices(); const sel=getSystemVoiceSetting();
  u.voice=voices.find(v=>v.name===sel)||voices.find(v=>v.lang.startsWith('ja'))||null;
- u.lang='ja-JP';
- u.rate=parseFloat(getRateSetting());
- u.pitch=1.0;
- u.onstart=()=>{
-   isSpeaking=true; isPaused=false;
-   const btn=document.getElementById('speakBtn'); if(btn) btn.textContent='⏸ 一時停止';
- };
- u.onpause=()=>{
-   isPaused=true;
-   const btn=document.getElementById('speakBtn'); if(btn) btn.textContent='▶ 続きから再開';
- };
- u.onresume=()=>{
-   isSpeaking=true; isPaused=false;
-   const btn=document.getElementById('speakBtn'); if(btn) btn.textContent='⏸ 一時停止';
- };
- u.onend=()=>{
-   isSpeaking=false; isPaused=false;
-   const btn=document.getElementById('speakBtn'); if(btn) btn.textContent='🔊 読み上げ';
- };
- u.onerror=()=>{
-   isSpeaking=false; isPaused=false;
-   const btn=document.getElementById('speakBtn'); if(btn) btn.textContent='🔊 読み上げ';
- };
+ u.lang='ja-JP';u.rate=parseFloat(getRateSetting());u.pitch=1.0;
+ u.onstart=()=>{isSpeaking=true;isPaused=false;if(buttonMode){const b=document.getElementById('speakBtn');if(b)b.textContent='⏸ 一時停止';}};
+ u.onpause=()=>{isPaused=true;if(buttonMode){const b=document.getElementById('speakBtn');if(b)b.textContent='▶ 続きから再開';}};
+ u.onresume=()=>{isSpeaking=true;isPaused=false;if(buttonMode){const b=document.getElementById('speakBtn');if(b)b.textContent='⏸ 一時停止';}};
+ u.onend=()=>{isSpeaking=false;isPaused=false;if(buttonMode){const b=document.getElementById('speakBtn');if(b)b.textContent='🔊 読み上げ';}if(onend)onend();};
+ u.onerror=()=>{isSpeaking=false;isPaused=false;if(buttonMode){const b=document.getElementById('speakBtn');if(b)b.textContent='🔊 読み上げ';}if(onend)onend();};
  speechSynthesis.speak(u);
 }
+function playSpeechForQuestion(q,text,onend=null,buttonMode=false){
+ if(getAudioEngineSetting()==='ai') return playAIAudio(q,'question',text,onend,null,buttonMode);
+ speakSystem(text,onend,buttonMode); return true;
+}
+function playSpeechForAnswer(q,text,onend=null){
+ if(getAudioEngineSetting()==='ai') return playAIAudio(q,'answer',text,onend,null,false);
+ speakSystem(text,onend,false); return true;
+}
+function speakResponse(q,n,text){
+ cancelSpeech();
+ if(getAudioEngineSetting()==='ai') playAIAudio(q,'answer',listenTextForAnswer(q),null,null,false);
+ else speakSystem(text,null,false);
+}
+
+function speakCurrent(forceStart=false) {
+ if(speakTimer){ clearTimeout(speakTimer); speakTimer=null; }
+ if(!forceStart){
+   if(getAudioEngineSetting()==='ai' && currentAudio){
+     const q=filtered[idx]; let t=readAloudText(`問題${q.no}。${q.text}。`); q.choices.forEach((c,i)=>t+=readAloudText(`選択肢${i+1}。${c}。`)); if(!q.audio)t='この問題は図を見る必要があります。'+t;
+     playAIAudio(q,'question',t,null,null,true); return;
+   }
+   if(getAudioEngineSetting()==='system' && 'speechSynthesis' in window){
+     if(isPaused && speechSynthesis.paused){speechSynthesis.resume();isPaused=false;isSpeaking=true;const b=document.getElementById('speakBtn');if(b)b.textContent='⏸ 一時停止';return;}
+     if(isSpeaking && speechSynthesis.speaking){speechSynthesis.pause();isPaused=true;const b=document.getElementById('speakBtn');if(b)b.textContent='▶ 続きから再開';return;}
+   }
+ }
+ const q=filtered[idx]; let t=readAloudText(`問題${q.no}。${q.text}。`); q.choices.forEach((c,i)=>t+=readAloudText(`選択肢${i+1}。${c}。`)); if(!q.audio)t='この問題は図を見る必要があります。'+t;
+ if(getAudioEngineSetting()==='ai') playAIAudio(q,'question',t,null,null,true); else { cancelSpeech(); speakSystem(t,null,true); }
+}
+function speak(text) { cancelSpeech(); speakSystem(text,null,true); }
 
 function showListenMenu(){
  cancelSpeech();
@@ -467,6 +502,7 @@ function showListenMenu(){
 }
 function stopSynthOnly(){
  if('speechSynthesis' in window) speechSynthesis.cancel();
+ stopCurrentAudio();
  if(listenTimer){ clearTimeout(listenTimer); listenTimer=null; }
 }
 function listenTextForQuestion(q){
@@ -499,7 +535,7 @@ function readAnswerChoiceForSpeech(q, num){
 function makeUtterance(text,onend){
  const u=new SpeechSynthesisUtterance(text);
  const voices=speechSynthesis.getVoices();
- const sel=getVoiceSetting();
+ const sel=getSystemVoiceSetting();
  u.voice=voices.find(v=>v.name===sel)||voices.find(v=>v.lang.startsWith('ja'))||null;
  u.lang='ja-JP'; u.rate=parseFloat(getRateSetting()); u.pitch=1.0;
  u.onend=()=>{ if(listenActive && !listenPaused && onend) onend(); };
@@ -520,38 +556,40 @@ function playListenQuestion(){
  document.getElementById('listenStatus').textContent=`問題 ${listenIndex+1} / ${getSelectedListenQuestions().length}`;
  document.getElementById('listenNow').textContent=`問${q.no}（${q.category}）を読み上げ中`;
  document.getElementById('listenBar').style.width=`${(listenIndex)/getSelectedListenQuestions().length*100}%`;
- speechSynthesis.speak(makeUtterance(listenTextForQuestion(q),()=>{
+ playSpeechForQuestion(q,listenTextForQuestion(q),()=>{
    if(!listenActive) return;
    listenStage='waitAnswer';
    const ms=parseInt(document.getElementById('listenPauseSelect').value||'5000',10);
    document.getElementById('listenNow').textContent=`考える時間… ${Math.round(ms/1000)}秒後に正解を読み上げます`;
    listenTimer=setTimeout(()=>{listenTimer=null; if(listenActive&&!listenPaused) playListenAnswer();},ms);
- }));
+ });
 }
 function playListenAnswer(){
  if(!listenActive||listenPaused) return;
  const listenQuestions=getSelectedListenQuestions(); const q=listenQuestions[listenIndex]; listenStage='answer';
  document.getElementById('listenNow').textContent=`問${q.no}の正解・解説を読み上げ中`;
- speechSynthesis.speak(makeUtterance(listenTextForAnswer(q),()=>{
+ playSpeechForAnswer(q,listenTextForAnswer(q),()=>{
    if(!listenActive) return;
    listenStage='waitNext';
    document.getElementById('listenBar').style.width=`${(listenIndex+1)/getSelectedListenQuestions().length*100}%`;
    if(listenIndex>=getSelectedListenQuestions().length-1){ finishListenThrough(); return; }
    document.getElementById('listenNow').textContent='次の問題へ…';
    listenTimer=setTimeout(()=>{listenTimer=null; if(listenActive&&!listenPaused){listenIndex++; playListenQuestion();}},1800);
- }));
+ });
 }
 function toggleListenPause(){
  if(!listenActive) return;
  const btn=document.getElementById('listenPauseBtn');
  if(!listenPaused){
    listenPaused=true;
-   if('speechSynthesis' in window && speechSynthesis.speaking && !speechSynthesis.paused) speechSynthesis.pause();
+   if(currentAudio && !currentAudio.paused) currentAudio.pause();
+   else if('speechSynthesis' in window && speechSynthesis.speaking && !speechSynthesis.paused) speechSynthesis.pause();
    if(listenTimer){ clearTimeout(listenTimer); listenTimer=null; }
    btn.textContent='▶ 続きから再開';
    document.getElementById('listenNow').textContent='一時停止中';
  } else {
    listenPaused=false; btn.textContent='⏸ 一時停止';
+   if(currentAudio && currentAudio.paused){ currentAudio.play().catch(()=>{}); return; }
    if('speechSynthesis' in window && speechSynthesis.paused){ speechSynthesis.resume(); return; }
    if(listenStage==='waitAnswer') playListenAnswer();
    else if(listenStage==='waitNext'){ listenIndex++; playListenQuestion(); }
@@ -574,27 +612,37 @@ function finishListenThrough(){
  document.getElementById('listenPauseBtn').disabled=true;
 }
 
-function getVoiceSetting(){ return localStorage.getItem('rikujou_voice')||''; }
+function getVoiceSetting(){ return getAudioEngineSetting()==='ai' ? getAIVoiceSetting() : getSystemVoiceSetting(); }
 function getRateSetting(){ return localStorage.getItem('rikujou_rate')||'0.95'; }
-function changeVoice(value){ localStorage.setItem('rikujou_voice',value); syncAudioControls(); }
-function changeRate(value){ localStorage.setItem('rikujou_rate',value); syncAudioControls(); }
-function populateVoiceSelect(id,vs){
- const el=document.getElementById(id); if(!el) return; el.innerHTML='';
- vs.forEach(v=>{const o=document.createElement('option');o.value=v.name;o.textContent=v.name+(v.localService?'':' (追加音声)');el.appendChild(o)});
- if(!vs.length){const o=document.createElement('option');o.value='';o.textContent='日本語音声（自動）';el.appendChild(o)}
-}
-function syncAudioControls(){
- const voice=getVoiceSetting(), rate=getRateSetting();
- ['homeVoiceSelect','quizVoiceSelect','listenVoiceSelect'].forEach(id=>{const el=document.getElementById(id); if(el && [...el.options].some(o=>o.value===voice)) el.value=voice;});
- ['homeRateSelect','quizRateSelect','listenRateSelect'].forEach(id=>{const el=document.getElementById(id); if(el) el.value=rate;});
-}
-function loadVoices() {
- const vs=speechSynthesis.getVoices().filter(v=>v.lang.startsWith('ja'));
- populateVoiceSelect('homeVoiceSelect',vs); populateVoiceSelect('quizVoiceSelect',vs); populateVoiceSelect('listenVoiceSelect',vs);
- if(!getVoiceSetting() && vs.length) localStorage.setItem('rikujou_voice',vs[0].name);
+function changeVoice(value){
+ if(getAudioEngineSetting()==='ai') localStorage.setItem('rikujou_ai_voice',value);
+ else { localStorage.setItem('rikujou_system_voice',value); localStorage.setItem('rikujou_voice',value); }
  syncAudioControls();
 }
-if('speechSynthesis' in window) {speechSynthesis.onvoiceschanged=loadVoices; loadVoices();} else {syncAudioControls();}
+function changeRate(value){ localStorage.setItem('rikujou_rate',value); if(currentAudio)currentAudio.playbackRate=aiPlaybackRate(); syncAudioControls(); }
+function populateVoiceSelect(id,vs){
+ const el=document.getElementById(id); if(!el)return; el.innerHTML='';
+ if(getAudioEngineSetting()==='ai'){
+   AI_VOICES.forEach(v=>{const o=document.createElement('option');o.value=v.id;o.textContent=v.label;el.appendChild(o)});
+ }else{
+   vs.forEach(v=>{const o=document.createElement('option');o.value=v.name;o.textContent=v.name+(v.localService?'':' (追加音声)');el.appendChild(o)});
+   if(!vs.length){const o=document.createElement('option');o.value='';o.textContent='日本語音声（自動）';el.appendChild(o)}
+ }
+}
+function populateAllVoiceSelects(){
+ const vs=('speechSynthesis' in window)?speechSynthesis.getVoices().filter(v=>v.lang.startsWith('ja')):[];
+ ['homeVoiceSelect','quizVoiceSelect','listenVoiceSelect'].forEach(id=>populateVoiceSelect(id,vs));
+ if(!getSystemVoiceSetting() && vs.length)localStorage.setItem('rikujou_system_voice',vs[0].name);
+}
+function syncAudioControls(){
+ const engine=getAudioEngineSetting(), voice=getVoiceSetting(), rate=getRateSetting();
+ ['homeEngineSelect','quizEngineSelect','listenEngineSelect'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=engine;});
+ ['homeVoiceSelect','quizVoiceSelect','listenVoiceSelect'].forEach(id=>{const el=document.getElementById(id);if(el&&[...el.options].some(o=>o.value===voice))el.value=voice;});
+ ['homeRateSelect','quizRateSelect','listenRateSelect'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=rate;});
+ const note=document.getElementById('homeAudioNote'); if(note)note.textContent=engine==='ai'?'高品質AI音声はGitHub上の事前生成MP3を再生します。未生成の問題・声は自動的に端末標準音声へ戻ります。':'端末標準音声はiPhone内の日本語音声を使用します。利用可能な音声は端末によって異なります。';
+}
+function loadVoices(){ populateAllVoiceSelects(); syncAudioControls(); }
+if('speechSynthesis' in window){speechSynthesis.onvoiceschanged=loadVoices;loadVoices();}else{populateAllVoiceSelects();syncAudioControls();}
 function saveAttempt(id,ok) { const all=JSON.parse(localStorage.getItem('rikujou_history')||'{}'); const x=all[id]||{tries:0,correct:0}; x.tries++; if(ok)x.correct++; x.last=new Date().toISOString(); all[id]=x; localStorage.setItem('rikujou_history',JSON.stringify(all)); }
 function showHistory() {
  const all=getHistoryData(); let tries=0,correct=0; Object.values(all).forEach(x=>{tries+=x.tries;correct+=x.correct});
