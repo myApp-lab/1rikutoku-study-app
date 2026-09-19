@@ -211,6 +211,8 @@ let listenStage='idle';
 let listenTimer=null;
 let currentAudio=null;
 let currentAudioKey='';
+let persistentAIAudio=null;
+let listenWakeLock=null;
 
 function initSetSelectors(){
  const hs=document.getElementById('homeSetSelect'); const ls=document.getElementById('listenSetSelect');
@@ -411,7 +413,7 @@ const AI_VOICES=[
 function getAudioEngineSetting(){ return localStorage.getItem('rikujou_audio_engine')||'system'; }
 function getSystemVoiceSetting(){ return localStorage.getItem('rikujou_system_voice')||localStorage.getItem('rikujou_voice')||''; }
 function getAIVoiceSetting(){ return localStorage.getItem('rikujou_ai_voice')||'marin'; }
-function changeAudioEngine(value){ localStorage.setItem('rikujou_audio_engine',value); cancelSpeech(); populateAllVoiceSelects(); syncAudioControls(); }
+function changeAudioEngine(value){ localStorage.setItem('rikujou_audio_engine',value); cancelSpeech(); if(value==='system'&&listenActive&&!listenPaused) requestListenWakeLock(); else releaseListenWakeLock(); populateAllVoiceSelects(); syncAudioControls(); }
 function safeAudioId(id){ return String(id).replace(/[^A-Za-z0-9_-]/g,'_'); }
 function aiAudioPath(q,kind,selectedNo=null){
  const voice=getAIVoiceSetting();
@@ -420,6 +422,24 @@ function aiAudioPath(q,kind,selectedNo=null){
  return `${base}/${kind}.mp3`;
 }
 function aiPlaybackRate(){ const r=parseFloat(getRateSetting()); if(r<=0.8)return .9; if(r>=1.1)return 1.1; return 1.0; }
+function getPersistentAIAudio(){
+ if(persistentAIAudio) return persistentAIAudio;
+ let a=document.getElementById('aiPersistentPlayer');
+ if(!a){
+   a=document.createElement('audio');
+   a.id='aiPersistentPlayer';
+   a.preload='auto';
+   a.setAttribute('playsinline','');
+   a.style.display='none';
+   document.body.appendChild(a);
+ }
+ persistentAIAudio=a;
+ return a;
+}
+function clearAIAudioHandlers(a){
+ if(!a) return;
+ a.onplay=a.onplaying=a.onwaiting=a.onstalled=a.onpause=a.onended=a.onerror=null;
+}
 function stopCurrentAudio(){
  if(currentAudio){ try{currentAudio.pause(); currentAudio.currentTime=0;}catch(e){} }
  currentAudio=null; currentAudioKey='';
@@ -433,8 +453,12 @@ function playAIAudio(q,kind,text,onend=null,selectedNo=null,buttonMode=false){
  }
  stopCurrentAudio();
  if('speechSynthesis' in window) speechSynthesis.cancel();
- const a=new Audio(aiAudioPath(q,kind,selectedNo));
- currentAudio=a; currentAudioKey=key; a.preload='auto'; a.playbackRate=aiPlaybackRate();
+ const a=getPersistentAIAudio();
+ clearAIAudioHandlers(a);
+ try{ a.pause(); a.currentTime=0; }catch(e){}
+ a.src=aiAudioPath(q,kind,selectedNo);
+ a.preload='auto'; a.playbackRate=aiPlaybackRate();
+ currentAudio=a; currentAudioKey=key;
  const updateListenMediaStatus=(state)=>{
    if(!listenActive || buttonMode) return;
    const qs=getSelectedListenQuestions(); const activeQ=qs[listenIndex];
@@ -464,7 +488,21 @@ function playAIAudio(q,kind,text,onend=null,selectedNo=null,buttonMode=false){
    speakSystem(text,onend,buttonMode);
  };
  updateListenMediaStatus('loading');
- a.play().catch(err=>{ if(err && err.name==='AbortError') return; a.onerror(); });
+ if('mediaSession' in navigator){
+   try{
+     navigator.mediaSession.metadata=new MediaMetadata({
+       title: kind==='answer' ? `問${q.no} 正解・解説` : `問${q.no} ${q.category||''}`,
+       artist:'第一級陸上特殊無線技士 学習アプリ',
+       album:'聞き流しモード'
+     });
+     navigator.mediaSession.setActionHandler('play',()=>{a.play().catch(()=>{});});
+     navigator.mediaSession.setActionHandler('pause',()=>{a.pause();});
+   }catch(e){}
+ }
+ // iPhoneでは最初のユーザー操作後に作成した同一のaudio要素を使い回す方が、
+ // 連続再生時の自動再生制限に引っ掛かりにくい。
+ a.load();
+ a.play().catch(err=>{ if(err && err.name==='AbortError') return; a.onerror && a.onerror(); });
  return true;
 }
 function speakSystem(text,onend=null,buttonMode=false){
@@ -532,12 +570,23 @@ function listenTextForQuestion(q){
  if(!q.audio) t='この問題は図を見る必要があります。'+t;
  return t;
 }
+function isDiagramDependentQuestion(q){
+ return !!q.image && q.audio===false;
+}
+function safeAnswerChoiceForSpeech(q,num){
+ // 図・回路・波形などを見ないと成立しない問題では、OCRされた図中文字を再解析しない。
+ // 正答番号と、明示的なchoicesに入っている選択肢だけを読む。
+ if(isDiagramDependentQuestion(q)){
+   const c=(q.choices||[])[num-1]||'';
+   return c && !/^\d+番$/.test(c) ? readAloudText(c) : '';
+ }
+ return readAnswerChoiceForSpeech(q,num);
+}
 function listenTextForAnswer(q){
- let answerText='';
- if(q.imageOnly){
-   answerText=`正解は、${q.answer}番です。`;
- }else{
-   answerText=`正解は、${q.answer}番です。 ${readAnswerChoiceForSpeech(q, q.answer)}`;
+ let answerText=`正解は、${q.answer}番です。`;
+ if(!q.imageOnly){
+   const choice=safeAnswerChoiceForSpeech(q,q.answer);
+   if(choice) answerText+=` ${choice}`;
  }
  return answerText + `。 ${q.normal}。 ${q.exam}`;
 }
@@ -563,9 +612,26 @@ function makeUtterance(text,onend){
  u.onerror=()=>{ if(listenActive && !listenPaused && onend) onend(); };
  return u;
 }
+async function requestListenWakeLock(){
+ if(getAudioEngineSetting()!=='system' || !listenActive) return;
+ if(!('wakeLock' in navigator) || document.visibilityState!=='visible') return;
+ try{
+   if(listenWakeLock && !listenWakeLock.released) return;
+   listenWakeLock=await navigator.wakeLock.request('screen');
+   listenWakeLock.addEventListener('release',()=>{listenWakeLock=null;});
+ }catch(e){ listenWakeLock=null; }
+}
+async function releaseListenWakeLock(){
+ if(listenWakeLock){ try{await listenWakeLock.release();}catch(e){} listenWakeLock=null; }
+}
+document.addEventListener('visibilitychange',()=>{
+ if(document.visibilityState==='visible' && listenActive && !listenPaused) requestListenWakeLock();
+});
+
 function startListenThrough(){
  stopSynthOnly();
  listenActive=true; listenPaused=false; listenIndex=0; listenStage='question';
+ requestListenWakeLock();
  document.getElementById('listenPauseBtn').disabled=false;
  document.getElementById('listenPauseBtn').textContent='⏸ 一時停止';
  document.getElementById('listenStartBtn').textContent='↻ 最初から';
@@ -603,6 +669,7 @@ function toggleListenPause(){
  const btn=document.getElementById('listenPauseBtn');
  if(!listenPaused){
    listenPaused=true;
+   releaseListenWakeLock();
    // iPhoneではMP3が読み込み中の間は currentAudio.paused=true のことがある。
    // その状態でも pause() を呼び、保留中の play() が後から開始しないようにする。
    if(currentAudio){ try{currentAudio.pause();}catch(e){} }
@@ -612,6 +679,7 @@ function toggleListenPause(){
    document.getElementById('listenNow').textContent='一時停止中';
  } else {
    listenPaused=false; btn.textContent='⏸ 一時停止';
+   requestListenWakeLock();
    if(currentAudio && currentAudio.paused){ currentAudio.play().catch(()=>{}); return; }
    if('speechSynthesis' in window && speechSynthesis.paused){ speechSynthesis.resume(); return; }
    if(listenStage==='waitAnswer') playListenAnswer();
@@ -621,14 +689,14 @@ function toggleListenPause(){
  }
 }
 function stopListenThrough(){
- stopSynthOnly(); listenActive=false; listenPaused=false; listenStage='idle';
+ stopSynthOnly(); releaseListenWakeLock(); listenActive=false; listenPaused=false; listenStage='idle';
  document.getElementById('listenStatus').textContent='停止しました';
  document.getElementById('listenNow').textContent='「開始」で最初から再生します。';
  document.getElementById('listenPauseBtn').disabled=true;
  document.getElementById('listenPauseBtn').textContent='⏸ 一時停止';
 }
 function finishListenThrough(){
- stopSynthOnly(); listenActive=false; listenPaused=false; listenStage='idle';
+ stopSynthOnly(); releaseListenWakeLock(); listenActive=false; listenPaused=false; listenStage='idle';
  document.getElementById('listenStatus').textContent='聞き流し完了';
  document.getElementById('listenNow').textContent='最後の問題まで読み上げました。';
  document.getElementById('listenBar').style.width='100%';
