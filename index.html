@@ -211,6 +211,7 @@ let listenStage='idle';
 let listenTimer=null;
 let currentAudio=null;
 let currentAudioKey='';
+let persistentAIAudio=null;
 let listenWakeLock=null;
 
 function initSetSelectors(){
@@ -426,6 +427,24 @@ function aiAudioPath(q,kind,selectedNo=null){
  return `${base}/${kind}.mp3`;
 }
 function aiPlaybackRate(){ const r=parseFloat(getRateSetting()); if(r<=0.8)return .9; if(r>=1.1)return 1.1; return 1.0; }
+function getPersistentAIAudio(){
+ if(persistentAIAudio) return persistentAIAudio;
+ let a=document.getElementById('aiPersistentPlayer');
+ if(!a){
+   a=document.createElement('audio');
+   a.id='aiPersistentPlayer';
+   a.preload='auto';
+   a.setAttribute('playsinline','');
+   a.style.display='none';
+   document.body.appendChild(a);
+ }
+ persistentAIAudio=a;
+ return a;
+}
+function clearAIAudioHandlers(a){
+ if(!a) return;
+ a.onplay=a.onplaying=a.onwaiting=a.onstalled=a.onpause=a.onended=a.onerror=null;
+}
 function stopCurrentAudio(){
  if(currentAudio){ try{currentAudio.pause(); currentAudio.currentTime=0;}catch(e){} }
  currentAudio=null; currentAudioKey='';
@@ -439,8 +458,12 @@ function playAIAudio(q,kind,text,onend=null,selectedNo=null,buttonMode=false){
  }
  stopCurrentAudio();
  if('speechSynthesis' in window) speechSynthesis.cancel();
- const a=new Audio(aiAudioPath(q,kind,selectedNo));
- currentAudio=a; currentAudioKey=key; a.preload='auto'; a.playbackRate=aiPlaybackRate();
+ const a=getPersistentAIAudio();
+ clearAIAudioHandlers(a);
+ try{ a.pause(); a.currentTime=0; }catch(e){}
+ a.src=aiAudioPath(q,kind,selectedNo);
+ a.preload='auto'; a.playbackRate=aiPlaybackRate();
+ currentAudio=a; currentAudioKey=key;
  const updateListenMediaStatus=(state)=>{
    if(!listenActive || buttonMode) return;
    const qs=getSelectedListenQuestions(); const activeQ=qs[listenIndex];
@@ -470,7 +493,21 @@ function playAIAudio(q,kind,text,onend=null,selectedNo=null,buttonMode=false){
    speakSystem(text,onend,buttonMode);
  };
  updateListenMediaStatus('loading');
- a.play().catch(err=>{ if(err && err.name==='AbortError') return; a.onerror(); });
+ if('mediaSession' in navigator){
+   try{
+     navigator.mediaSession.metadata=new MediaMetadata({
+       title: kind==='answer' ? `問${q.no} 正解・解説` : `問${q.no} ${q.category||''}`,
+       artist:'第一級陸上特殊無線技士 学習アプリ',
+       album:'聞き流しモード'
+     });
+     navigator.mediaSession.setActionHandler('play',()=>{a.play().catch(()=>{});});
+     navigator.mediaSession.setActionHandler('pause',()=>{a.pause();});
+   }catch(e){}
+ }
+ // iPhoneでは最初のユーザー操作後に作成した同一のaudio要素を使い回す方が、
+ // 連続再生時の自動再生制限に引っ掛かりにくい。
+ a.load();
+ a.play().catch(err=>{ if(err && err.name==='AbortError') return; a.onerror && a.onerror(); });
  return true;
 }
 function speakSystem(text,onend=null,buttonMode=false){
