@@ -211,6 +211,7 @@ let listenStage='idle';
 let listenTimer=null;
 let currentAudio=null;
 let currentAudioKey='';
+let listenWakeLock=null;
 
 function initSetSelectors(){
  const hs=document.getElementById('homeSetSelect'); const ls=document.getElementById('listenSetSelect');
@@ -591,9 +592,26 @@ function makeUtterance(text,onend){
  u.onerror=()=>{ if(listenActive && !listenPaused && onend) onend(); };
  return u;
 }
+async function requestListenWakeLock(){
+ if(!listenActive || listenPaused) return;
+ if(!('wakeLock' in navigator) || document.visibilityState!=='visible') return;
+ try{
+   if(listenWakeLock && !listenWakeLock.released) return;
+   listenWakeLock=await navigator.wakeLock.request('screen');
+   listenWakeLock.addEventListener('release',()=>{listenWakeLock=null;});
+ }catch(e){ listenWakeLock=null; }
+}
+async function releaseListenWakeLock(){
+ if(listenWakeLock){ try{await listenWakeLock.release();}catch(e){} listenWakeLock=null; }
+}
+document.addEventListener('visibilitychange',()=>{
+ if(document.visibilityState==='visible' && listenActive && !listenPaused) requestListenWakeLock();
+});
+
 function startListenThrough(){
  stopSynthOnly();
  listenActive=true; listenPaused=false; listenIndex=0; listenStage='question';
+ requestListenWakeLock();
  document.getElementById('listenPauseBtn').disabled=false;
  document.getElementById('listenPauseBtn').textContent='⏸ 一時停止';
  document.getElementById('listenStartBtn').textContent='↻ 最初から';
@@ -631,6 +649,7 @@ function toggleListenPause(){
  const btn=document.getElementById('listenPauseBtn');
  if(!listenPaused){
    listenPaused=true;
+   releaseListenWakeLock();
    // iPhoneではMP3が読み込み中の間は currentAudio.paused=true のことがある。
    // その状態でも pause() を呼び、保留中の play() が後から開始しないようにする。
    if(currentAudio){ try{currentAudio.pause();}catch(e){} }
@@ -640,6 +659,7 @@ function toggleListenPause(){
    document.getElementById('listenNow').textContent='一時停止中';
  } else {
    listenPaused=false; btn.textContent='⏸ 一時停止';
+   requestListenWakeLock();
    if(currentAudio && currentAudio.paused){ currentAudio.play().catch(()=>{}); return; }
    if('speechSynthesis' in window && speechSynthesis.paused){ speechSynthesis.resume(); return; }
    if(listenStage==='waitAnswer') playListenAnswer();
@@ -649,14 +669,14 @@ function toggleListenPause(){
  }
 }
 function stopListenThrough(){
- stopSynthOnly(); listenActive=false; listenPaused=false; listenStage='idle';
+ stopSynthOnly(); releaseListenWakeLock(); listenActive=false; listenPaused=false; listenStage='idle';
  document.getElementById('listenStatus').textContent='停止しました';
  document.getElementById('listenNow').textContent='「開始」で最初から再生します。';
  document.getElementById('listenPauseBtn').disabled=true;
  document.getElementById('listenPauseBtn').textContent='⏸ 一時停止';
 }
 function finishListenThrough(){
- stopSynthOnly(); listenActive=false; listenPaused=false; listenStage='idle';
+ stopSynthOnly(); releaseListenWakeLock(); listenActive=false; listenPaused=false; listenStage='idle';
  document.getElementById('listenStatus').textContent='聞き流し完了';
  document.getElementById('listenNow').textContent='最後の問題まで読み上げました。';
  document.getElementById('listenBar').style.width='100%';
