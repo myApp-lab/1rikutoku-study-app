@@ -1,0 +1,11 @@
+本番統合 QA
+============
+2022年2月問題数: 72
+詳細解説3フィールド: 72/72
+canonical speechQuestion: 72/72
+図必須・正解読み上げ抑止: 13問
+画像参照: 72/72存在
+既知選択肢数回帰: JZ42A-7=4, JZ42A-15=4, JZ42B-15=4, JZ42B-18=5
+Wake Lock: 維持
+永続AI Audio要素: 維持（createElement('audio') 1箇所）
+Service Worker cache: 7へ更新
