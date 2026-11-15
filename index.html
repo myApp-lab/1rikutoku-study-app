@@ -240,6 +240,12 @@ function start(m) {
  if(!filtered.length){ alert('このモードで出題できる問題がありません。'); return; }
  show('quiz'); render();
 }
+function explanationShortText(q){ return q.explanationShort || q.short || `正解は${q.answer}番です。`; }
+function explanationNormalText(q){ return q.explanation || q.normal || ''; }
+function explanationExamTipText(q){ return q.examTip || q.exam || ''; }
+function explanationHtml(q){
+ return `<b>一言</b><p>${explanationShortText(q)}</p><b>標準解説</b><p>${explanationNormalText(q)}</p><b>試験対策</b><p>${explanationExamTipText(q)}</p><div class="small">※解説は学習用に作成したもので、公式解説ではありません。</div>`;
+}
 function render() {
  cancelSpeech();
  const q=filtered[idx]; document.getElementById('modeLabel').textContent = mode==='study'?'学習モード':mode==='exam'?'本番モード':mode==='audio'?'音声モード':mode==='random'?'ランダム10問':'苦手問題';
@@ -273,7 +279,7 @@ function restoreCurrentAnswer() {
    buttons.forEach((b,i)=>{if(i+1===q.answer)b.classList.add('correct'); else if(i+1===n&&!ok)b.classList.add('wrong')});
    const ex=document.getElementById('explanation');
    ex.className='card';
-   ex.innerHTML=`<b>一言</b><p>${q.short}</p><b>標準解説</b><p>${q.normal}</p><b>試験対策</b><p>${q.exam}</p><div class="small">※解説は学習用に作成したもので、公式解説ではありません。</div>`;
+   ex.innerHTML=explanationHtml(q);
  }
 }
 function prevQuestion() {
@@ -292,7 +298,7 @@ function choose(n,btn) {
  if(mode!=='exam') {
    const fb=document.getElementById('feedback'); const ok=n===q.answer; fb.className='result '+(ok?'good':'bad'); fb.textContent=ok?'○ 正解！':`× 不正解　正解は${q.answer}番`;
    [...document.querySelectorAll('.choice')].forEach((b,i)=>{if(i+1===q.answer)b.classList.add('correct'); else if(i+1===n&&!ok)b.classList.add('wrong')});
-   const ex=document.getElementById('explanation'); ex.className='card'; ex.innerHTML=`<b>一言</b><p>${q.short}</p><b>標準解説</b><p>${q.normal}</p><b>試験対策</b><p>${q.exam}</p><div class="small">※解説は学習用に作成したもので、公式解説ではありません。</div>`;
+   const ex=document.getElementById('explanation'); ex.className='card'; ex.innerHTML=explanationHtml(q);
    saveAttempt(q.id,ok);
    if(mode==='audio' || ((mode==='study'||mode==='random'||mode==='weak') && wasReading)) {
      const selectedSpeech=readAnswerChoiceForSpeech(q,n);
@@ -302,7 +308,7 @@ function choose(n,btn) {
      const lead = ok
        ? `あなたの回答は${n}番${selectedText}。正解です。`
        : `あなたの回答は${n}番${selectedText}。不正解です。正解は${q.answer}番${correctText}。`;
-     speakResponse(q,n,readAloudText(`${lead} ${q.normal} ${q.exam}`));
+     speakResponse(q,n,readAloudText(`${lead} ${explanationNormalText(q)} ${explanationExamTipText(q)}`));
    }
  }
 }
@@ -588,10 +594,12 @@ function listenTextForQuestion(q){
  let t=readAloudText(`問題${q.no}。${speechQuestionBase(q)}。`);
  const choices=speechChoiceList(q);
  if(choices.length) t += ' 選択肢。 ' + choices.map(readAloudText).join(' ');
- if(q.speechNeedsVisual || !q.audio) t='この問題は図を画面で確認してください。 '+t;
+ const visualNotice='この問題は図を画面で確認してください。';
+ if((q.speechNeedsVisual || !q.audio) && !t.includes(visualNotice)) t=visualNotice+' '+t;
  return t;
 }
 function listenTextForAnswer(q){
+ if(q.speechSuppressAnswer) return '';
  const hasStructuredAnswer=!!(q.speechCombo || (Array.isArray(q.speechChoices) && q.speechChoices.length));
  let answerText='';
  if(q.imageOnly && !hasStructuredAnswer){
@@ -599,7 +607,7 @@ function listenTextForAnswer(q){
  }else{
    answerText=`正解は、${q.answer}番です。 ${readAnswerChoiceForSpeech(q, q.answer)}`;
  }
- return readAloudText(answerText + `。 ${q.normal}。 ${q.exam}`);
+ return readAloudText(answerText + `。 ${explanationNormalText(q)}。 ${explanationExamTipText(q)}`);
 }
 function readAnswerChoiceForSpeech(q, num){
  // レイアウト解析済みの音声メタデータを最優先する。
@@ -662,6 +670,14 @@ function playListenQuestion(){
  document.getElementById('listenBar').style.width=`${(listenIndex)/getSelectedListenQuestions().length*100}%`;
  playSpeechForQuestion(q,listenTextForQuestion(q),()=>{
    if(!listenActive) return;
+   if(q.speechSuppressAnswer){
+     listenStage='waitNext';
+     document.getElementById('listenBar').style.width=`${(listenIndex+1)/getSelectedListenQuestions().length*100}%`;
+     if(listenIndex>=getSelectedListenQuestions().length-1){ finishListenThrough(); return; }
+     document.getElementById('listenNow').textContent='図を確認してください。次の問題へ…';
+     listenTimer=setTimeout(()=>{listenTimer=null;if(listenActive&&!listenPaused){listenIndex++;playListenQuestion();}},1800);
+     return;
+   }
    listenStage='waitAnswer';
    const ms=parseInt(document.getElementById('listenPauseSelect').value||'5000',10);
    document.getElementById('listenNow').textContent=`考える時間… ${Math.round(ms/1000)}秒後に正解を読み上げます`;
