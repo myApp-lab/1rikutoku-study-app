@@ -11,6 +11,7 @@ const voice = (process.env.AI_VOICE || process.argv[2] || 'marin').trim();
 const model = process.env.AI_TTS_MODEL || 'gpt-4o-mini-tts';
 const repoRoot = process.cwd();
 const outRoot = path.join(repoRoot, 'audio', 'ai', voice);
+const CANONICAL_AUDIO_SCHEMA = '2022-02-canonical-v1';
 
 const jpChoiceNo = n => ({'1':'一番','2':'二番','3':'三番','4':'四番','5':'五番','１':'一番','２':'二番','３':'三番','４':'四番','５':'五番'})[String(n)] || `${n}番`;
 const normalizeHeaderLetter = x => ({'Ａ':'A','Ｂ':'B','Ｃ':'C','Ｄ':'D','Ｅ':'E'})[x] || x;
@@ -58,9 +59,40 @@ function speechChoiceList(q){
  if(Array.isArray(q.speechChoices))return q.speechChoices.map((c,i)=>`${jpChoiceNo(i+1)}。 ${c}。`);
  if(!q.imageOnly)return (q.choices||[]).map((c,i)=>`${jpChoiceNo(i+1)}。 ${c}。`); return [];
 }
-function questionText(q){ let t=readAloudText(`問題${q.no}。${q.speechQuestion||q.text||''}。`); const cs=speechChoiceList(q); if(cs.length)t+=` 選択肢。 ${cs.map(readAloudText).join(' ')}`; if(q.speechNeedsVisual||!q.audio)t=`この問題は図を画面で確認してください。 ${t}`; return t; }
-function answerText(q){ const has=!!(q.speechCombo||(Array.isArray(q.speechChoices)&&q.speechChoices.length)); let a=(q.imageOnly&&!has)?`正解は、${q.answer}番です。`:`正解は、${q.answer}番です。 ${readAnswerChoiceForSpeech(q,q.answer)}`; return readAloudText(`${a}。 ${q.normal}。 ${q.exam}`); }
-function responseText(q,n){ const ok=n===q.answer; const selected=q.imageOnly?'':`、${readAnswerChoiceForSpeech(q,n)}`; const correct=q.imageOnly?'':`、${readAnswerChoiceForSpeech(q,q.answer)}`; const lead=ok?`あなたの回答は${n}番${selected}。正解です。`:`あなたの回答は${n}番${selected}。不正解です。正解は${q.answer}番${correct}。`; return readAloudText(`${lead} ${q.normal} ${q.exam}`); }
+function isVisualOnlySpeech(q){
+ return !!(q.speechNeedsVisual || q.speechSuppressAnswer);
+}
+function explanationText(q){
+ return q.explanation || q.normal || '';
+}
+function examTipText(q){
+ return q.examTip || q.exam || '';
+}
+function questionText(q){
+ const notice='この問題は図を画面で確認してください。';
+ let t=readAloudText(`問題${q.no}。${q.speechQuestion||q.text||''}。`);
+ if(isVisualOnlySpeech(q)){
+  if(!t.includes(notice)) t=`${notice} ${t}`;
+  return t;
+ }
+ const cs=speechChoiceList(q);
+ if(cs.length)t+=` 選択肢。 ${cs.map(readAloudText).join(' ')}`;
+ return t;
+}
+function answerText(q){
+ if(q.speechSuppressAnswer)return '';
+ if(q.speechAnswer) return readAloudText(q.speechAnswer);
+ const has=!!(q.speechCombo||(Array.isArray(q.speechChoices)&&q.speechChoices.length));
+ let a=(q.imageOnly&&!has)?`正解は、${q.answer}番です。`:`正解は、${q.answer}番です。 ${readAnswerChoiceForSpeech(q,q.answer)}`;
+ return readAloudText(`${a}。 ${explanationText(q)}。 ${examTipText(q)}`);
+}
+function responseText(q,n){
+ const ok=n===q.answer;
+ const selected=q.imageOnly?'':`、${readAnswerChoiceForSpeech(q,n)}`;
+ const correct=q.imageOnly?'':`、${readAnswerChoiceForSpeech(q,q.answer)}`;
+ const lead=ok?`あなたの回答は${n}番${selected}。正解です。`:`あなたの回答は${n}番${selected}。不正解です。正解は${q.answer}番${correct}。`;
+ return readAloudText(`${lead} ${explanationText(q)} ${examTipText(q)}`);
+}
 
 async function loadCatalog(){
  const data=await fs.readFile(path.join(repoRoot,'data.js'),'utf8'); const ctx={}; vm.createContext(ctx); vm.runInContext(`${data}\nglobalThis.__sets=importedSets;`,ctx,{timeout:10000});
@@ -68,9 +100,20 @@ async function loadCatalog(){
  if(m){ const c={}; vm.createContext(c); vm.runInContext(`globalThis.__legacy=${m[1]};`,c,{timeout:10000}); legacy=c.__legacy; }
  return [{id:'2022-06-JZ46A',label:'2022年6月 無線工学 JZ46A（5問収録）',subject:'無線工学',questions:legacy},...ctx.__sets];
 }
-async function synth(text,file,trackChanges=false){
+async function removeGeneratedPair(file){
+ const hashFile=file+'.sha256';
+ if(DRY_RUN){
+  console.log('dry-run remove if exists',path.relative(repoRoot,file));
+  console.log('dry-run remove if exists',path.relative(repoRoot,hashFile));
+  return;
+ }
+ await fs.rm(file,{force:true});
+ await fs.rm(hashFile,{force:true});
+}
+
+async function synth(text,file,trackChanges=false,hashContext=''){
  if(text.length>4096) throw new Error(`${file} は4096文字を超えています (${text.length})。問題データを分割してください。`);
- const hash=crypto.createHash('sha256').update(text).digest('hex');
+ const hash=crypto.createHash('sha256').update(`${hashContext}\0${model}\0${text}`).digest('hex');
  const hashFile=file+'.sha256';
  if(DRY_RUN){ console.log('dry-run',path.relative(repoRoot,file),text.length,trackChanges?'tracked':'normal'); return; }
  await fs.mkdir(path.dirname(file),{recursive:true});
@@ -88,12 +131,22 @@ async function synth(text,file,trackChanges=false){
 
 const catalog=await loadCatalog();
 let count=0;
+let removed=0;
 for(const set of catalog){
  for(const q of set.questions){
   const dir=path.join(outRoot,String(q.id).replace(/[^A-Za-z0-9_-]/g,'_'));
-  const force=!!(q.speechQuestion||q.speechCombo||q.speechChoices||/[□▢☐]|([。．])\s*内に入|の\s+内には/.test(q.text||''));
-  await synth(questionText(q),path.join(dir,'question.mp3'),force); count++;
-  await synth(answerText(q),path.join(dir,'answer.mp3'),force); count++;
+  const isCanonical202202=String(q.id||'').startsWith('2022-02-');
+  const trackChanges=isCanonical202202 || !!(q.speechQuestion||q.speechCombo||q.speechChoices||/[□▢☐]|([。．])\s*内に入|の\s+内には/.test(q.text||''));
+  const hashContext=isCanonical202202?CANONICAL_AUDIO_SCHEMA:'';
+  await synth(questionText(q),path.join(dir,'question.mp3'),trackChanges,hashContext); count++;
+  const answerFile=path.join(dir,'answer.mp3');
+  if(q.speechSuppressAnswer){
+   await removeGeneratedPair(answerFile);
+   removed++;
+  }else{
+   await synth(answerText(q),answerFile,trackChanges,hashContext);
+   count++;
+  }
  }
 }
-console.log(`完了: ${voice} / 最大 ${count} ファイル（既存ファイルはスキップ）`);
+console.log(`完了: ${voice} / 最大 ${count} ファイル / 図問題のanswer削除対象 ${removed} 件（変更なしはスキップ）`);
